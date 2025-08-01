@@ -390,3 +390,58 @@
     (ok new-rate)
   )
 )
+
+(define-public (update-sbtc-contract (new-contract principal))
+  (begin
+    (asserts! (is-contract-owner tx-sender) ERR_UNAUTHORIZED)
+    ;; Additional validation to ensure the contract is valid
+    (asserts! (not (is-eq new-contract (as-contract tx-sender)))
+      ERR_INVALID_CONTRACT
+    )
+    (asserts! (is-standard new-contract) ERR_INVALID_CONTRACT)
+    (var-set sbtc-token-contract new-contract)
+    (ok new-contract)
+  )
+)
+
+(define-public (pause-protocol (pause bool))
+  (begin
+    (asserts! (is-contract-owner tx-sender) ERR_UNAUTHORIZED)
+    (var-set protocol-paused pause)
+    (ok pause)
+  )
+)
+
+(define-public (emergency-withdraw
+    (sbtc-contract <sbtc-token-trait>)
+    (recipient principal)
+    (amount uint)
+  )
+  (begin
+    (asserts! (is-contract-owner tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (var-get emergency-mode) ERR_UNAUTHORIZED)
+    ;; Additional validations for emergency withdrawal
+    (asserts! (is-valid-sbtc-contract (contract-of sbtc-contract))
+      ERR_INVALID_CONTRACT
+    )
+    (asserts! (is-standard recipient) ERR_INVALID_CONTRACT)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (as-contract (contract-call? sbtc-contract transfer amount (as-contract tx-sender)
+      recipient
+    ))
+  )
+)
+
+(define-public (activate-emergency-mode)
+  (begin
+    (asserts! (is-contract-owner tx-sender) ERR_UNAUTHORIZED)
+    (var-set emergency-mode true)
+    (var-set protocol-paused true)
+    (ok true)
+  )
+)
+
+;; INITIALIZATION
+
+;; Initialize protocol start block
+(var-set protocol-start-block stacks-block-height)
