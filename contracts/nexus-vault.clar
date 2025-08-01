@@ -291,3 +291,102 @@
     )
   )
 )
+
+(define-public (claim-rewards (sbtc-contract <sbtc-token-trait>))
+  (let (
+      (user tx-sender)
+      (position (unwrap! (get-user-position user) ERR_NO_POSITION_FOUND))
+      (available-rewards (calculate-position-rewards position))
+    )
+    ;; Validations
+    (asserts! (is-protocol-active) ERR_PROTOCOL_PAUSED)
+    (asserts! (is-valid-sbtc-contract (contract-of sbtc-contract))
+      ERR_INVALID_CONTRACT
+    )
+    (asserts! (> available-rewards u0) ERR_NO_REWARDS_AVAILABLE)
+    ;; Transfer rewards to user
+    (match (as-contract (contract-call? sbtc-contract transfer available-rewards
+      (as-contract tx-sender) user
+    ))
+      success (begin
+        ;; Update position
+        (map-set user-positions user {
+          staked-amount: (get staked-amount position),
+          start-block: (get start-block position),
+          lock-period-blocks: (get lock-period-blocks position),
+          total-rewards-claimed: (+ (get total-rewards-claimed position) available-rewards),
+          last-claim-block: stacks-block-height,
+          lock-bonus-multiplier: (get lock-bonus-multiplier position),
+        })
+        ;; Update user statistics
+        (let ((stats (unwrap! (get-user-statistics user) ERR_NO_POSITION_FOUND)))
+          (map-set user-statistics user {
+            lifetime-staked: (get lifetime-staked stats),
+            lifetime-rewards: (+ (get lifetime-rewards stats) available-rewards),
+            total-positions: (get total-positions stats),
+            first-stake-block: (get first-stake-block stats),
+          })
+        )
+        ;; Update protocol state
+        (var-set total-rewards-distributed
+          (+ (var-get total-rewards-distributed) available-rewards)
+        )
+        (ok available-rewards)
+      )
+      error
+      ERR_TRANSFER_FAILED
+    )
+  )
+)
+
+(define-public (close-position (sbtc-contract <sbtc-token-trait>))
+  (let (
+      (user tx-sender)
+      (position (unwrap! (get-user-position user) ERR_NO_POSITION_FOUND))
+      (stake-amount (get staked-amount position))
+      (available-rewards (calculate-position-rewards position))
+    )
+    ;; Validations
+    (asserts! (is-valid-sbtc-contract (contract-of sbtc-contract))
+      ERR_INVALID_CONTRACT
+    )
+    (asserts! (is-position-unlocked user) ERR_POSITION_STILL_LOCKED)
+    ;; Claim any remaining rewards first if available
+    (begin
+      (if (> available-rewards u0)
+        (begin
+          (try! (claim-rewards sbtc-contract))
+          true
+        )
+        true
+      )
+      ;; Return staked amount to user
+      (match (as-contract (contract-call? sbtc-contract transfer stake-amount (as-contract tx-sender)
+        user
+      ))
+        success (begin
+          ;; Remove position
+          (map-delete user-positions user)
+          ;; Update protocol TVL
+          (var-set total-value-locked
+            (- (var-get total-value-locked) stake-amount)
+          )
+          (ok stake-amount)
+        )
+        error
+        ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; ADMINISTRATIVE FUNCTIONS
+
+(define-public (update-base-rewards-rate (new-rate uint))
+  (begin
+    (asserts! (is-contract-owner tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (<= new-rate MAX_APR) ERR_INVALID_AMOUNT)
+    (var-set base-rewards-rate new-rate)
+    (ok new-rate)
+  )
+)
