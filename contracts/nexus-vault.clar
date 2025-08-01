@@ -199,3 +199,95 @@
 (define-read-only (get-user-position (user principal))
   (map-get? user-positions user)
 )
+
+(define-read-only (get-user-statistics (user principal))
+  (map-get? user-statistics user)
+)
+
+(define-read-only (get-protocol-info)
+  {
+    tvl: (var-get total-value-locked),
+    total-rewards: (var-get total-rewards-distributed),
+    base-apr: (var-get base-rewards-rate),
+    is-paused: (var-get protocol-paused),
+    emergency-mode: (var-get emergency-mode),
+    sbtc-contract: (var-get sbtc-token-contract),
+  }
+)
+
+(define-read-only (get-available-rewards (user principal))
+  (match (get-user-position user)
+    position (ok (calculate-position-rewards position))
+    ERR_NO_POSITION_FOUND
+  )
+)
+
+(define-read-only (is-position-unlocked (user principal))
+  (match (get-user-position user)
+    position (let ((unlock-block (+ (get start-block position) (get lock-period-blocks position))))
+      (>= stacks-block-height unlock-block)
+    )
+    false
+  )
+)
+
+;; CORE STAKING FUNCTIONS
+
+(define-public (create-position
+    (sbtc-contract <sbtc-token-trait>)
+    (amount uint)
+    (lock-period-blocks uint)
+  )
+  (let (
+      (user tx-sender)
+      (current-block stacks-block-height)
+      (lock-bonus (calculate-lock-bonus lock-period-blocks))
+    )
+    ;; Validations
+    (asserts! (is-protocol-active) ERR_PROTOCOL_PAUSED)
+    (asserts! (is-valid-sbtc-contract (contract-of sbtc-contract))
+      ERR_INVALID_CONTRACT
+    )
+    (asserts! (validate-amount amount) ERR_BELOW_MINIMUM_STAKE)
+    (asserts! (validate-lock-period lock-period-blocks) ERR_INVALID_LOCK_PERIOD)
+    (asserts! (is-none (get-user-position user)) ERR_ALREADY_STAKED)
+    ;; Transfer sBTC to contract
+    (match (contract-call? sbtc-contract transfer amount user (as-contract tx-sender))
+      success (begin
+        ;; Create position
+        (map-set user-positions user {
+          staked-amount: amount,
+          start-block: current-block,
+          lock-period-blocks: lock-period-blocks,
+          total-rewards-claimed: u0,
+          last-claim-block: current-block,
+          lock-bonus-multiplier: lock-bonus,
+        })
+        ;; Update user statistics
+        (let ((existing-stats (default-to {
+            lifetime-staked: u0,
+            lifetime-rewards: u0,
+            total-positions: u0,
+            first-stake-block: current-block,
+          }
+            (get-user-statistics user)
+          )))
+          (map-set user-statistics user {
+            lifetime-staked: (+ (get lifetime-staked existing-stats) amount),
+            lifetime-rewards: (get lifetime-rewards existing-stats),
+            total-positions: (+ (get total-positions existing-stats) u1),
+            first-stake-block: (if (is-eq (get total-positions existing-stats) u0)
+              current-block
+              (get first-stake-block existing-stats)
+            ),
+          })
+        )
+        ;; Update protocol state
+        (var-set total-value-locked (+ (var-get total-value-locked) amount))
+        (ok amount)
+      )
+      error
+      ERR_TRANSFER_FAILED
+    )
+  )
+)
