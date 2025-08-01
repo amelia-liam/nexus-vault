@@ -98,3 +98,104 @@
     rewards-distributed: uint,
   }
 )
+
+;; VALIDATION FUNCTIONS
+
+(define-private (is-contract-owner (caller principal))
+  (is-eq caller CONTRACT_OWNER)
+)
+
+(define-private (is-valid-sbtc-contract (contract principal))
+  (is-eq contract (var-get sbtc-token-contract))
+)
+
+(define-private (is-protocol-active)
+  (and
+    (not (var-get protocol-paused))
+    (not (var-get emergency-mode))
+  )
+)
+
+(define-private (validate-amount (amount uint))
+  (and
+    (> amount u0)
+    (>= amount MIN_STAKE_AMOUNT)
+  )
+)
+
+(define-private (validate-lock-period (lock-blocks uint))
+  (and
+    (>= lock-blocks MIN_LOCK_PERIOD)
+    (<= lock-blocks MAX_LOCK_PERIOD)
+  )
+)
+
+;; CALCULATION FUNCTIONS
+
+;; Helper function to get minimum of two values
+(define-private (min-uint
+    (a uint)
+    (b uint)
+  )
+  (if (< a b)
+    a
+    b
+  )
+)
+
+;; Calculate lock bonus multiplier based on lock period
+(define-private (calculate-lock-bonus (lock-period uint))
+  (let (
+      (years-locked (/ lock-period BLOCKS_PER_YEAR))
+      (bonus-rate (min-uint (* years-locked u100) u500)) ;; Max 5% bonus per year, capped at 25%
+    )
+    (+ PRECISION_FACTOR bonus-rate)
+    ;; Return multiplier in basis points
+  )
+)
+
+;; Calculate rewards with overflow protection
+(define-private (calculate-position-rewards (position {
+  staked-amount: uint,
+  start-block: uint,
+  lock-period-blocks: uint,
+  total-rewards-claimed: uint,
+  last-claim-block: uint,
+  lock-bonus-multiplier: uint,
+}))
+  (let (
+      (current-block stacks-block-height)
+      (last-claim (get last-claim-block position))
+      (blocks-eligible (if (> current-block last-claim)
+        (- current-block last-claim)
+        u0
+      ))
+      (stake-amount (get staked-amount position))
+      (base-rate (var-get base-rewards-rate))
+      (lock-multiplier (get lock-bonus-multiplier position))
+    )
+    (if (is-eq blocks-eligible u0)
+      u0
+      (let (
+          ;; Calculate base rewards: (amount * rate * blocks) / (PRECISION_FACTOR * blocks_per_year)
+          (base-numerator (* (* stake-amount base-rate) blocks-eligible))
+          (base-denominator (* PRECISION_FACTOR BLOCKS_PER_YEAR))
+          (base-rewards (/ base-numerator base-denominator))
+          ;; Apply lock bonus: base_rewards * lock_multiplier / PRECISION_FACTOR
+          (bonus-rewards (/ (* base-rewards lock-multiplier) PRECISION_FACTOR))
+        )
+        ;; Return total rewards with overflow check
+        (if (< bonus-rewards (* stake-amount u2)) ;; Sanity check: rewards shouldn't exceed 2x stake
+          bonus-rewards
+          u0
+        )
+      )
+    )
+  )
+)
+
+;; READ-ONLY FUNCTIONS
+
+(define-read-only (get-user-position (user principal))
+  (map-get? user-positions user)
+)
